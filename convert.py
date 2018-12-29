@@ -9,19 +9,15 @@ import datetime
 
 import pprint
 
-from typing import Any, Dict, Iterable, List, Tuple, Callable, Optional, Set
+from typing import Any, Dict, Iterable, List, Tuple, Callable, Optional, Set, Union
 
 _FNULL = open(os.devnull, 'w')
-_DATA_DIR = 'data'
-_OUT_DIR = 'output'
+_DATA_DIR: str = 'data'
+_OUT_DIR: str = 'output'
+_CURRENT_YEAR = datetime.datetime.now().year
 
-_DEBUG = None
-
-
-class Section(enum.Enum):
-  A = enum.auto()
-  B = enum.auto()
-  C = enum.auto()
+_DEBUG: Optional[bool] = None
+_PRINT_FAILURES: Optional[bool] = None
 
 
 def getPFDFilenames() -> Iterable[Tuple[str, str]]:
@@ -36,81 +32,117 @@ def getPFDFilenames() -> Iterable[Tuple[str, str]]:
         yield _DATA_DIR, file
 
 
-def getTextContents() -> Iterable[List[str]]:
+def getTextContents(match: str = None) -> Iterable[Iterable[str]]:
   """Yields cleaned str contents"""
   for root, dirs, files in os.walk(os.path.join(_DATA_DIR, _OUT_DIR)):
     for file in files:
-      if file.endswith('.txt'):
+      if (file.endswith('.txt')
+          and (not match or match.lower() in file.lower())):
         with open(os.path.join(root, file)) as fp:
-          yield [
-              unicodedata.normalize("NFKD", line).strip()
-              for line in fp.readlines()
-          ]
+          yield (unicodedata.normalize("NFKD", line).strip()
+                 for line in fp.readlines())
 
 
-def percent(x: str) -> float:
-  return float(x.strip('%')) / 100
+def percent(x: str) -> Union[float, str]:
+  try:
+    return float(x.strip('%')) / 100
+  except ValueError:
+    return "N/A"
 
 
-def addToDict(key: str,
-              constructor=str) -> Callable[[str, Dict[str, Any]], bool]:
-  def fun(value: str, acc: Dict[str, Any]) -> bool:
-    val = value.strip()
-    if val:
-      acc[key] = constructor(val)
-    return False
-
-  return fun
-
-
-def processSATPercentiles(key: str) -> Callable[[str, Dict[str, Any]], bool]:
-  def fun(value: str, acc: Dict[str, Any]) -> bool:
-    fragments = [val for val in value.split(" ") if val]
-    if len(fragments) > 1:
-      acc["SAT Math (%s)" % key] = percent(fragments[-1])
-      acc["SAT Reading (%s)" % key] = percent(fragments[-2])
-    return False
-
-  return fun
-
-
-_CURRENT_YEAR = datetime.datetime.now().year
-
-
-def date(x: str) -> datetime.datetime:
-  date = datetime.datetime.strptime(x, '%m/%d')
+def date(x: str) -> Union[datetime.datetime, str]:
+  kCandidateFormats = ['%m/%d', '%d-%b', '%b %d']
+  tried = 0
+  while True:
+    try:
+      date = datetime.datetime.strptime(x, kCandidateFormats[tried])
+      break
+    except ValueError as e:
+      tried += 1
+      if tried >= len(kCandidateFormats):
+        print(e)
+        return x
   if date.month < 6:
     return date.replace(year=_CURRENT_YEAR + 1)
   return date.replace(year=_CURRENT_YEAR)
 
 
-def processAverageGPA(value: str, acc: Dict[str, Any]) -> bool:
+def genericInt(x: str) -> Union[int, str]:
+  try:
+    return int(x.replace(',', ''))
+  except:
+    return "N/A"
+
+
+def genericFloat(x: str) -> Union[float, str]:
+  try:
+    return float(x.replace(',', ''))
+  except:
+    return "N/A"
+
+
+class ProcessorResult(enum.Enum):
+  NEXT_LINE = enum.auto()
+  SUCCESS = enum.auto()
+  FAILED = enum.auto()
+
+
+def addToDict(key: str, constructor=str
+              ) -> Callable[[str, Dict[str, Any]], ProcessorResult]:
+  def fun(value: str, acc: Dict[str, Any]) -> bool:
+    val = value.strip()
+    if val:
+      acc[key] = constructor(val)
+      return ProcessorResult.SUCCESS
+    return ProcessorResult.FAILED
+
+  return fun
+
+
+def processSATPercentiles(
+    key: str) -> Callable[[str, Dict[str, Any]], ProcessorResult]:
+  def fun(value: str, acc: Dict[str, Any]) -> bool:
+    fragments = [val for val in value.split(" ") if val]
+    if len(fragments) > 1:
+      acc["SAT Math (%s)" % key] = percent(fragments[-1])
+      acc["SAT Reading (%s)" % key] = percent(fragments[-2])
+      return ProcessorResult.SUCCESS
+    return ProcessorResult.FAILED
+
+  return fun
+
+
+def processAverageGPA(value: str, acc: Dict[str, Any]) -> ProcessorResult:
   if not value:
     # We want to grab the next line since the snippet above matched pretty well.
-    return True
+    return ProcessorResult.NEXT_LINE
   fragments = [val for val in value.split(":") if val]
-  if not fragments or len(fragments) < 2: return False
-  acc['Average GPA'] = float(fragments[-1])
-  return False
+  if not fragments or len(fragments) < 2:
+    return ProcessorResult.FAILED
+  acc['Average GPA'] = genericFloat(fragments[-1])
+  return ProcessorResult.SUCCESS
 
 
-def genericInt(x: str) -> int:
-  return int(x.replace(',', ''))
-
-
-def processSATReadingPercentiles(value: str, acc: Dict[str, Any]) -> bool:
-  if not value: return True
+def processSATReadingPercentiles(value: str,
+                                 acc: Dict[str, Any]) -> ProcessorResult:
+  if not value:
+    return ProcessorResult.NEXT_LINE
   fragments = [val for val in value.split(" ") if val]
   if len(fragments) >= 2:
     acc["SAT Reading 75%"] = genericInt(fragments[-1])
     acc["SAT Reading 25%"] = genericInt(fragments[-2])
+    return ProcessorResult.SUCCESS
+  return ProcessorResult.FAILED
 
 
-def processSATMathPercentiles(value: str, acc: Dict[str, Any]) -> bool:
+def processSATMathPercentiles(value: str,
+                              acc: Dict[str, Any]) -> ProcessorResult:
   fragments = [val for val in value.split(" ") if val]
   if len(fragments) >= 2:
     acc["SAT Math 75%"] = genericInt(fragments[-1])
     acc["SAT Math 25%"] = genericInt(fragments[-2])
+    return ProcessorResult.SUCCESS
+  return ProcessorResult.FAILED
 
 
 _PROCESSORS = [
@@ -141,9 +173,9 @@ _PROCESSORS = [
     # Special threhold needed for these two since there are other very
     # similar values in the PDF (for part-time) students
     ('Total full-time, first­-time, first-­year (freshman) men who enrolled',
-     addToDict('Men Enrolled', genericInt), 0.01),
+     addToDict('Men Enrolled', genericInt), 0.04),
     ('Total full-time, first­-time, first­-year (freshman) women who enrolled',
-     addToDict('Women Enrolled', genericInt), 0.01),
+     addToDict('Women Enrolled', genericInt), 0.04),
     ('Percent who had GPA of 3.75 and higher', addToDict('GPA >3.75', percent),
      None),
     ('Percent who had GPA between 3.50 and 3.74',
@@ -162,21 +194,22 @@ _PROCESSORS = [
      addToDict('GPA >1.00 ', percent), None),
     ('Average high school GPA of all degree­-seeking, first-­time, first­-year',
      processAverageGPA, None),
-    ('SAT Evidence­Based Reading', processSATReadingPercentiles, None),
-    ('SAT Math', processSATMathPercentiles, None),
-    ('700­-800', processSATPercentiles('700-800'), None),
-    ('600-699', processSATPercentiles('600-699'), None),
-    ('500-599', processSATPercentiles('500-599'), None),
-    ('400-499', processSATPercentiles('400-499'), None),
-    ('300-399', processSATPercentiles('300-399'), None),
-    ('200-299', processSATPercentiles('200-299'), None),
+    ('SAT Evidence­-Based Reading', processSATReadingPercentiles, 0.2),
+    ('SAT Critical Reading', processSATReadingPercentiles, 0.2),
+    ('SAT Math', processSATMathPercentiles, 0.2),
+    ('700­-800', processSATPercentiles('700-800'), 0.15),
+    ('600-699', processSATPercentiles('600-699'), 0.15),
+    ('500-599', processSATPercentiles('500-599'), 0.15),
+    ('400-499', processSATPercentiles('400-499'), 0.15),
+    ('300-399', processSATPercentiles('300-399'), 0.15),
+    ('200-299', processSATPercentiles('200-299'), 0.15),
 ]
 
 
 # Map from "approximate matching line" to function to call to process it.
 def retrieveProcessorForLine(
-    description: str,
-    processed: Set[str]) -> Optional[Callable[[str, Dict[str, Any]], bool]]:
+    description: str, processed: Set[str]
+) -> Optional[Tuple[str, Callable[[str, Dict[str, Any]], ProcessorResult]]]:
   kThreshold = 0.075
   descLen = len(description)
   ratiosAndFunctions = []
@@ -184,45 +217,69 @@ def retrieveProcessorForLine(
     if trigger in processed: continue
     distance = editdistance.eval(trigger, description)
     ratio = distance / (len(trigger) + descLen)
-    if _DEBUG: print(description, trigger, ratio)
+    if _DEBUG:
+      print(description, trigger, ratio)
     if ((not threshold and ratio < kThreshold)
         or (threshold and ratio < threshold)):
       ratiosAndFunctions.append((ratio, trigger, func))
   if not ratiosAndFunctions:
     return None
   _, trigger, func = sorted(ratiosAndFunctions, key=lambda x: x[0])[0]
-  if _DEBUG: print("Using trigger: %s for line: %s" % (trigger, description))
-  processed.add(trigger)
-  return func
+  if _DEBUG:
+    print()
+    print("Using trigger: %s for line: %s" % (trigger, description))
+    print()
+  return trigger, func
 
 
 def isInterestingSection(section: str) -> bool:
-  kInterestingSections = {"A1", "C9", "C11", "C12", "C21"}
+  kInterestingSections = {"A1", "C9", "C1", "C11", "C12", "C21", "C22"}
   return ((len(section) == 2 or len(section) == 3)
-          and section in kInterestingSections)
+          and section.strip() in kInterestingSections)
 
 
-def ExtractDataFromText(contents: List[str]) -> Dict[str, Any]:
-  result: Dict[str, Any] = {}
+def ExtractDataFromText(contents: Iterable[str]) -> Dict[str, Any]:
+  collegeInfo: Dict[str, Any] = {}
   iterator = iter(contents)
-  processed = {False for _ in range(len(_PROCESSORS))}
+  processed: Set[str] = set()
   for line in iterator:
-    fragments = [fragment for fragment in line.split("  ") if fragment]
-    if not fragments or len(fragments) <= 1: continue
-    section, description, value = fragments[0], fragments[1], " ".join(
-        fragments[2:])
-    if not isInterestingSection(section): continue
-    processor = retrieveProcessorForLine(description, processed)
-    if not processor: continue
-    # This indicates the processor is interested in getting data from the next
-    # line.
-    if _DEBUG: print("Processor is given value: %s" % value)
-    while processor(value, result):
+    fragments = [fragment for fragment in line.split(" ") if fragment]
+    if not fragments: continue
+    section = fragments[0]
+    if not isInterestingSection(section) or not fragments: continue
+    fragments = [
+        fragment for fragment in line[len(section) + 1:].split("  ")
+        if fragment
+    ]
+    if not fragments: continue
+    description, value = fragments[0], " ".join(fragments[1:])
+    if _DEBUG:
+      print()
+      print(section)
+      print()
+    triggerAndProcessor = retrieveProcessorForLine(description, processed)
+    if not triggerAndProcessor: continue
+    trigger, processor = triggerAndProcessor
+    if _DEBUG:
+      print()
+      print("Processor is given value: %s" % value)
+      print()
+    result = processor(value, collegeInfo)
+    while result == ProcessorResult.NEXT_LINE:
       value = " ".join(
           [value] +
           [fragment for fragment in next(iterator).split("  ") if fragment])
+      result = processor(value, collegeInfo)
+    if result == ProcessorResult.SUCCESS:
+      processed.add(trigger)
 
-  return result
+  if _DEBUG or _PRINT_FAILURES:
+    print()
+    print()
+    for trigger, _, _ in _PROCESSORS:
+      if trigger not in processed:
+        print("Failed to extract information for %s" % trigger)
+  return collegeInfo
 
 
 def ConvertToText() -> None:
@@ -259,15 +316,18 @@ def add_bool_arg(parser: argparse.ArgumentParser,
 
 def main():
   parser = argparse.ArgumentParser(description='Generate College Data Files')
+  parser.add_argument('--college', default=None, type=str)
   add_bool_arg(parser, 'convert')
   add_bool_arg(parser, 'debug')
+  add_bool_arg(parser, 'print_failures')
   args = parser.parse_args()
   if args.convert:
     ConvertToText()
-  global _DEBUG
+  global _DEBUG, _PRINT_FAILURES
   _DEBUG = args.debug
+  _PRINT_FAILURES = args.print_failures
 
-  for textFileContents in getTextContents():
+  for textFileContents in getTextContents(args.college):
     data: Dict[str, Any] = ExtractDataFromText(textFileContents)
     pprint.pprint(data)
 
