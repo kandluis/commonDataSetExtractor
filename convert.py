@@ -32,15 +32,18 @@ def getPFDFilenames() -> Iterable[Tuple[str, str]]:
         yield _DATA_DIR, file
 
 
-def getTextContents(match: str = None) -> Iterable[Iterable[str]]:
+def getTextContentsAndName(
+    match: str = None) -> Iterable[Tuple[str, List[str]]]:
   """Yields cleaned str contents"""
   for root, dirs, files in os.walk(os.path.join(_DATA_DIR, _OUT_DIR)):
     for file in files:
       if (file.endswith('.txt')
           and (not match or match.lower() in file.lower())):
         with open(os.path.join(root, file)) as fp:
-          yield (unicodedata.normalize("NFKD", line).strip()
-                 for line in fp.readlines())
+          yield (file, [
+              unicodedata.normalize("NFKD", line).strip()
+              for line in fp.readlines()
+          ])
 
 
 def percent(x: str) -> Union[float, str]:
@@ -51,7 +54,9 @@ def percent(x: str) -> Union[float, str]:
 
 
 def date(x: str) -> Union[datetime.datetime, str]:
-  kCandidateFormats = ['%m/%d', '%d-%b', '%b %d']
+  if 'Mid-December'.lower() in x.lower():
+    return 'Mid-December'
+  kCandidateFormats = ['%m/%d', '%d-%b', '%b %d', '%b. %d']
   tried = 0
   while True:
     try:
@@ -60,8 +65,8 @@ def date(x: str) -> Union[datetime.datetime, str]:
     except ValueError as e:
       tried += 1
       if tried >= len(kCandidateFormats):
-        print(e)
-        return x
+        print("Error: %s" % e)
+        return "N/A"
   if date.month < 6:
     return date.replace(year=_CURRENT_YEAR + 1)
   return date.replace(year=_CURRENT_YEAR)
@@ -89,20 +94,22 @@ class ProcessorResult(enum.Enum):
 
 def addToDict(key: str, constructor=str
               ) -> Callable[[str, Dict[str, Any]], ProcessorResult]:
-  def fun(value: str, acc: Dict[str, Any]) -> bool:
+  def fun(value: str, acc: Dict[str, Any]) -> ProcessorResult:
+    if not value: return ProcessorResult.NEXT_LINE
     val = value.strip()
     if val:
       acc[key] = constructor(val)
       return ProcessorResult.SUCCESS
-    return ProcessorResult.FAILED
+    return ProcessorResult.NEXT_LINE
 
   return fun
 
 
 def processSATPercentiles(
     key: str) -> Callable[[str, Dict[str, Any]], ProcessorResult]:
-  def fun(value: str, acc: Dict[str, Any]) -> bool:
+  def fun(value: str, acc: Dict[str, Any]) -> ProcessorResult:
     fragments = [val for val in value.split(" ") if val]
+    if not fragments: return ProcessorResult.NEXT_LINE
     if len(fragments) > 1:
       acc["SAT Math (%s)" % key] = percent(fragments[-1])
       acc["SAT Reading (%s)" % key] = percent(fragments[-2])
@@ -162,7 +169,7 @@ _PROCESSORS = [
     ('Early action closing date', addToDict('EA Deadline', date), None),
     ('Early action notification date', addToDict('EA Notification', date),
      None),
-    ('Total first­-time, first ­year (freshman) men who applied',
+    ('Total first­-time, first-year (freshman) men who applied',
      addToDict('Men Applied', genericInt), None),
     ('Total first­-time, first-year (freshman) women who applied',
      addToDict('Women Applied', genericInt), None),
@@ -196,6 +203,9 @@ _PROCESSORS = [
      processAverageGPA, None),
     ('SAT Evidence­-Based Reading', processSATReadingPercentiles, 0.2),
     ('SAT Critical Reading', processSATReadingPercentiles, 0.2),
+    ('SAT Evidence­-', processSATReadingPercentiles, 0.2),
+    ('SAT Evidence­-Based Reading and Writing', processSATReadingPercentiles,
+     0.2),
     ('SAT Math', processSATMathPercentiles, 0.2),
     ('700­-800', processSATPercentiles('700-800'), 0.15),
     ('600-699', processSATPercentiles('600-699'), 0.15),
@@ -204,6 +214,12 @@ _PROCESSORS = [
     ('300-399', processSATPercentiles('300-399'), 0.15),
     ('200-299', processSATPercentiles('200-299'), 0.15),
 ]
+
+# List of sets of triggers which are mutually exclusive.
+_SAME_PROCESSORS: List[Set[str]] = [{
+    'SAT Evidence­-Based Reading', 'SAT Critical Reading', 'SAT Evidence­-',
+    'SAT Evidence­-Based Reading and Writing'
+}]
 
 
 # Map from "approximate matching line" to function to call to process it.
@@ -238,47 +254,85 @@ def isInterestingSection(section: str) -> bool:
           and section.strip() in kInterestingSections)
 
 
-def ExtractDataFromText(contents: Iterable[str]) -> Dict[str, Any]:
-  collegeInfo: Dict[str, Any] = {}
-  iterator = iter(contents)
+def ExtractDataFromText(filename: str, contents: List[str]) -> Dict[str, Any]:
+  collegeInfo: Dict[str, Any] = {'filename': filename}
   processed: Set[str] = set()
-  for line in iterator:
-    fragments = [fragment for fragment in line.split(" ") if fragment]
-    if not fragments: continue
+  i: int = 0
+  while i < len(contents):
+    line = contents[i]
+    fragments = [fragment.strip() for fragment in line.split(" ") if fragment]
+    if not fragments:
+      i += 1
+      continue
     section = fragments[0]
-    if not isInterestingSection(section) or not fragments: continue
+    if not isInterestingSection(section):
+      i += 1
+      continue
     fragments = [
-        fragment for fragment in line[len(section) + 1:].split("  ")
+        fragment.strip() for fragment in line[len(section) + 1:].split("  ")
         if fragment
     ]
-    if not fragments: continue
+    if not fragments:
+      i += 1
+      line = contents[i]
+      fragments = [
+          fragment.strip() for fragment in line.split(" ") if fragment
+      ]
+      if not fragments: continue
+      section = fragments[0]
+      if isInterestingSection(section): continue
+      fragments = [
+          fragment.strip() for fragment in line.split("  ") if fragment
+      ]
     description, value = fragments[0], " ".join(fragments[1:])
     if _DEBUG:
       print()
       print(section)
       print()
     triggerAndProcessor = retrieveProcessorForLine(description, processed)
-    if not triggerAndProcessor: continue
+    if not triggerAndProcessor:
+      i += 1
+      continue
     trigger, processor = triggerAndProcessor
     if _DEBUG:
       print()
       print("Processor is given value: %s" % value)
       print()
     result = processor(value, collegeInfo)
-    while result == ProcessorResult.NEXT_LINE:
+    while result == ProcessorResult.NEXT_LINE and i < len(contents):
+      i += 1
+      line = contents[i]
+      fragments = [fragment for fragment in line.split(" ") if fragment]
+      if not fragments:
+        i += 1
+        continue
+      section = fragments[0]
+      # We skip this processor and rewind (outer loop increments)
+      if isInterestingSection(section):
+        i -= 1
+        break
       value = " ".join(
           [value] +
-          [fragment for fragment in next(iterator).split("  ") if fragment])
+          [fragment.strip() for fragment in line.split("  ") if fragment])
+      if _DEBUG:
+        print("Processor is given value: %s" % value)
       result = processor(value, collegeInfo)
+
     if result == ProcessorResult.SUCCESS:
       processed.add(trigger)
+      for sameSets in _SAME_PROCESSORS:
+        if trigger in sameSets:
+          for other in sameSets:
+            processed.add(other)
+    i += 1
 
   if _DEBUG or _PRINT_FAILURES:
     print()
     print()
-    for trigger, _, _ in _PROCESSORS:
-      if trigger not in processed:
-        print("Failed to extract information for %s" % trigger)
+    triggers: Set[str] = {trigger for trigger, _, _ in _PROCESSORS}
+    failed: Set[str] = triggers - processed
+    for failure in sorted(failed):
+      print("Failed to extract information for %s" % failure)
   return collegeInfo
 
 
@@ -314,6 +368,14 @@ def add_bool_arg(parser: argparse.ArgumentParser,
   parser.set_defaults(**{name: default})
 
 
+def getTable(collegeFilter: str) -> pd.DataFrame:
+  data = [
+      ExtractDataFromText(name, textFileContents)
+      for name, textFileContents in getTextContentsAndName(collegeFilter)
+  ]
+  return pd.DataFrame.from_dict(data)
+
+
 def main():
   parser = argparse.ArgumentParser(description='Generate College Data Files')
   parser.add_argument('--college', default=None, type=str)
@@ -327,9 +389,7 @@ def main():
   _DEBUG = args.debug
   _PRINT_FAILURES = args.print_failures
 
-  for textFileContents in getTextContents(args.college):
-    data: Dict[str, Any] = ExtractDataFromText(textFileContents)
-    pprint.pprint(data)
+  getTable(args.college).to_csv('data/results.csv')
 
 
 if __name__ == '__main__':
