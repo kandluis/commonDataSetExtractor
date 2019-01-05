@@ -380,24 +380,29 @@ def DownloadPdfs() -> None:
 def ConvertToText() -> None:
   '''Converts input data into str.
   '''
-  processes = []
+  processes: List[Tuple[str, Any]] = []
   for root, filename in getPFDFilenames():
     infilepath = os.path.join(root, filename)
     basename = filename[:-len('.pdf')]
     outfilepath = os.path.join(root, _OUT_DIR, '%s.txt' % basename)
     command = ['gs', '-sDEVICE=txtwrite', '-o', outfilepath, infilepath]
     if _DEBUG: print("Running command %s." % " ".join(command))
-    processes.append(subprocess.Popen(command))
+    processes.append((filename, subprocess.Popen(command)))
 
   successful = 0
-  for process in processes:
+  failed: List[str] = []
+  for filename, process in processes:
     if process.wait() == 0:
       successful += 1
+    else:
+      failed.append(filename)
     if successful % 10 == 0:
       print("Finished waiting for %s successful conversions." % successful)
 
   print("Finished %s successful conversion%s of %s." %
         (successful, "" if successful < 2 else "s", len(processes)))
+  for failure in failed:
+    print("Failed to convert file: %s" % failure)
 
 
 def add_bool_arg(parser: argparse.ArgumentParser,
