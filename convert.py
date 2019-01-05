@@ -6,6 +6,10 @@ import enum
 import editdistance
 import unicodedata
 import datetime
+import ssl
+
+from urllib import request
+from concurrent import futures
 
 import pprint
 
@@ -336,6 +340,43 @@ def ExtractDataFromText(filename: str, contents: List[str]) -> Dict[str, Any]:
   return collegeInfo
 
 
+def DownloadPdfs() -> None:
+  '''Downloads PDFs for the schools as specified in data/links.csv'''
+
+  context = ssl._create_unverified_context()
+  request_headers = {
+      'User-Agent': 'curl/7.47.1',
+      'content-type': 'application/pdf'
+  }
+
+  def download_file(info: Tuple[str, str]) -> None:
+    filepath: str = info[0]
+    download_url: str = info[1]
+    try:
+      query = request.Request(download_url, headers=request_headers)
+      response = request.urlopen(query, context=context)
+      with open(filepath, 'wb') as file:
+        file.write(response.read())
+    except Exception as e:
+      print("Failed on URL: %s" % download_url)
+      print(e)
+
+  data: pd.DataFrame = pd.read_csv(
+      os.path.join(_DATA_DIR, 'links.csv'), header=0)
+  original: int = len(data)
+  data = data[~data.Download.isnull()]
+  arguments = [(os.path.join(
+      _DATA_DIR, "%s.pdf" % (row.School.replace(' ', '_').lower())),
+                row.Download) for row in data.itertuples() if row.Download]
+  print("Dropped %s values without URLs." % (original - len(arguments)))
+  with futures.ThreadPoolExecutor(max_workers=10) as executor:
+    results = executor.map(download_file, arguments)
+
+  # This waits for all to be done.
+  for result in results:
+    pass
+
+
 def ConvertToText() -> None:
   '''Converts input data into str.
   '''
@@ -380,16 +421,19 @@ def main():
   parser = argparse.ArgumentParser(description='Generate College Data Files')
   parser.add_argument('--college', default=None, type=str)
   add_bool_arg(parser, 'convert')
+  add_bool_arg(parser, 'download')
   add_bool_arg(parser, 'debug')
   add_bool_arg(parser, 'print_failures')
   args = parser.parse_args()
+  if args.download:
+    DownloadPdfs()
   if args.convert:
     ConvertToText()
   global _DEBUG, _PRINT_FAILURES
   _DEBUG = args.debug
   _PRINT_FAILURES = args.print_failures
 
-  getTable(args.college).to_csv('data/results.csv')
+  # getTable(args.college).to_csv('data/results.csv')
 
 
 if __name__ == '__main__':
