@@ -387,7 +387,7 @@ def ConvertToText() -> None:
     outfilepath = os.path.join(root, _OUT_DIR, '%s.txt' % basename)
     command = ['gs', '-sDEVICE=txtwrite', '-o', outfilepath, infilepath]
     if _DEBUG: print("Running command %s." % " ".join(command))
-    processes.append(subprocess.Popen(command, stdout=_FNULL))
+    processes.append(subprocess.Popen(command))
 
   successful = 0
   for process in processes:
