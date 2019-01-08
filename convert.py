@@ -24,16 +24,22 @@ _DEBUG: Optional[bool] = None
 _PRINT_FAILURES: Optional[bool] = None
 
 
-def getPFDFilenames() -> Iterable[Tuple[str, str]]:
+def getPDFFilenames() -> Iterable[Tuple[str, str, str]]:
   '''Yields the list of PDF filenames.
 
   Yields:
-    List of tuples of (dir, filename.pdf) to extract.
+    List of tuples of (dir, filename.pdf, processor) to extract.
   '''
+  data = pd.read_csv(os.path.join(_DATA_DIR, "links.csv"), header=0)
+  processors = {
+      "%s.pdf" % GetFileName(row.School): row.Processor
+      for row in data.itertuples()
+  }
+  data.School = data.School.apply(lambda x: GetFileName(x))
   for root, dirs, files in os.walk(_DATA_DIR):
     for file in files:
       if file.endswith('.pdf'):
-        yield _DATA_DIR, file
+        yield _DATA_DIR, file, processors[file.lower()]
 
 
 def getTextContentsAndName(
@@ -361,6 +367,10 @@ def ExtractDataFromText(filename: str, contents: List[str]) -> Dict[str, Any]:
   return collegeInfo
 
 
+def GetFileName(schoolName: str) -> str:
+  return schoolName.replace(' ', '_').lower()
+
+
 def DownloadPdfs(collegeFilter: Optional[str]) -> None:
   '''Downloads PDFs for the schools as specified in data/links.csv'''
 
@@ -387,8 +397,7 @@ def DownloadPdfs(collegeFilter: Optional[str]) -> None:
   dropped = data[data.Download.isnull()]
   data = data[~data.Download.isnull()]
   arguments = [
-      (os.path.join(_DATA_DIR,
-                    "%s.pdf" % (row.School.replace(' ', '_').lower())),
+      (os.path.join(_DATA_DIR, "%s.pdf" % (GetFileName(row.School))),
        row.Download) for row in data.itertuples() if row.Download and (
            not collegeFilter or collegeFilter.lower() in row.School.lower())
   ]
@@ -409,13 +418,23 @@ def ConvertToText(collegeFilter: Optional[str]) -> None:
   '''Converts input data into str.
   '''
   processes: List[Tuple[str, Any]] = []
-  for root, filename in getPFDFilenames():
+  for root, filename, processor in getPDFFilenames():
     infilepath = os.path.join(root, filename)
     basename = filename[:-len('.pdf')]
     if (collegeFilter is None or editdistance.eval(collegeFilter, basename) /
         (len(collegeFilter) + len(basename)) < 0.5):
       outfilepath = os.path.join(root, _OUT_DIR, '%s.txt' % basename)
-      command = ['gs', '-sDEVICE=txtwrite', '-o', outfilepath, infilepath]
+      command = None
+      if processor.lower() == "gs":
+        command = ['gs', '-sDEVICE=txtwrite', '-o', outfilepath, infilepath]
+      elif processor.lower() == "./pdftotext":
+        command = [
+            './pdftotext', '-layout', '-eol', 'unix', '-nopgbrk', infilepath,
+            outfilepath
+        ]
+      else:
+        raise Exception("Processor not implemeneted: %s" % processor)
+
       if _DEBUG:
         print("Running command %s" % " ".join(command))
       processes.append((filename, subprocess.Popen(command, stdout=_FNULL)))
