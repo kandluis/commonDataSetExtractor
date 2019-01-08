@@ -15,7 +15,7 @@ import pprint
 
 from typing import Any, Dict, Iterable, List, Tuple, Callable, Optional, Set, Union
 
-_FNULL = open(os.devnull, 'w')
+_FNULL = open(os.devnull, 'wb')
 _DATA_DIR: str = 'data'
 _OUT_DIR: str = 'output'
 _CURRENT_YEAR = datetime.datetime.now().year
@@ -43,24 +43,40 @@ def getTextContentsAndName(
     for file in files:
       if (file.endswith('.txt')
           and (not match or match.lower() in file.lower())):
-        with open(os.path.join(root, file)) as fp:
+        with open(os.path.join(root, file), 'r+', encoding="ISO-8859-1") as fp:
           yield (file, [
               unicodedata.normalize("NFKD", line).strip()
               for line in fp.readlines()
           ])
 
 
-def percent(x: str) -> Union[float, str]:
+def percent(x: str) -> Optional[float]:
   try:
     return float(x.strip('%')) / 100
   except ValueError:
-    return "N/A"
+    return None
 
 
 def date(x: str) -> Union[datetime.datetime, str]:
-  if 'Mid-December'.lower() in x.lower():
-    return 'Mid-December'
-  kCandidateFormats = ['%m/%d', '%d-%b', '%b %d', '%b. %d']
+  kTextMatches = [
+      'Mid-December', 'Mid December', 'Mid-February', 'Mid February',
+      'Rolling', 'late January'
+  ]
+  for match in kTextMatches:
+    if match.lower() in x.lower():
+      return match
+
+  def generateDatesMatches(dateformat: str) -> List[str]:
+    return [
+        "%s%s" % (dateformat, suffix)
+        for suffix in ("", "st", "nd", "rd", "th")
+    ]
+
+  kCandidateFormats = [
+      match for dateformat in
+      ['%m/%d', '%d-%b', '%b %d', '%b. %d', '%m/%d/%Y', "%B %d", "-%d-%b"]
+      for match in generateDatesMatches(dateformat)
+  ]
   tried = 0
   while True:
     try:
@@ -69,25 +85,25 @@ def date(x: str) -> Union[datetime.datetime, str]:
     except ValueError as e:
       tried += 1
       if tried >= len(kCandidateFormats):
-        print("Error: %s" % e)
-        return "N/A"
+        if _DEBUG: print("Error: %s" % e)
+        return x
   if date.month < 6:
     return date.replace(year=_CURRENT_YEAR + 1)
   return date.replace(year=_CURRENT_YEAR)
 
 
-def genericInt(x: str) -> Union[int, str]:
+def genericInt(x: str) -> Optional[int]:
   try:
     return int(x.replace(',', ''))
   except:
-    return "N/A"
+    return None
 
 
-def genericFloat(x: str) -> Union[float, str]:
+def genericFloat(x: str) -> Optional[float]:
   try:
     return float(x.replace(',', ''))
   except:
-    return "N/A"
+    return None
 
 
 class ProcessorResult(enum.Enum):
@@ -268,7 +284,7 @@ def ExtractDataFromText(filename: str, contents: List[str]) -> Dict[str, Any]:
     if not fragments:
       i += 1
       continue
-    section = fragments[0]
+    section = fragments[0].replace('.', '')
     if not isInterestingSection(section):
       i += 1
       continue
@@ -283,7 +299,7 @@ def ExtractDataFromText(filename: str, contents: List[str]) -> Dict[str, Any]:
           fragment.strip() for fragment in line.split(" ") if fragment
       ]
       if not fragments: continue
-      section = fragments[0]
+      section = fragments[0].replace('.', '')
       if isInterestingSection(section): continue
       fragments = [
           fragment.strip() for fragment in line.split("  ") if fragment
@@ -310,7 +326,7 @@ def ExtractDataFromText(filename: str, contents: List[str]) -> Dict[str, Any]:
       if not fragments:
         i += 1
         continue
-      section = fragments[0]
+      section = fragments[0].replace('.', '')
       # We skip this processor and rewind (outer loop increments)
       if isInterestingSection(section):
         i -= 1
@@ -330,17 +346,22 @@ def ExtractDataFromText(filename: str, contents: List[str]) -> Dict[str, Any]:
             processed.add(other)
     i += 1
 
+  triggers: Set[str] = {trigger for trigger, _, _ in _PROCESSORS}
+  failed: Set[str] = triggers - processed
+  # Always print those with a high failure rate.
   if _DEBUG or _PRINT_FAILURES:
     print()
     print()
-    triggers: Set[str] = {trigger for trigger, _, _ in _PROCESSORS}
-    failed: Set[str] = triggers - processed
     for failure in sorted(failed):
-      print("Failed to extract information for %s" % failure)
+      print(
+          "Failed to extract information for %s from %s" % (failure, filename))
+  if len(failed) / len(triggers) > 0.5:
+    print("Failed to Process %s" % filename)
+
   return collegeInfo
 
 
-def DownloadPdfs() -> None:
+def DownloadPdfs(collegeFilter: Optional[str]) -> None:
   '''Downloads PDFs for the schools as specified in data/links.csv'''
 
   context = ssl._create_unverified_context()
@@ -359,16 +380,23 @@ def DownloadPdfs() -> None:
         file.write(response.read())
     except Exception as e:
       print("Failed on URL: %s" % download_url)
-      print(e)
+      if _DEBUG: print(e)
 
   data: pd.DataFrame = pd.read_csv(
       os.path.join(_DATA_DIR, 'links.csv'), header=0)
-  original: int = len(data)
+  dropped = data[data.Download.isnull()]
   data = data[~data.Download.isnull()]
-  arguments = [(os.path.join(
-      _DATA_DIR, "%s.pdf" % (row.School.replace(' ', '_').lower())),
-                row.Download) for row in data.itertuples() if row.Download]
-  print("Dropped %s values without URLs." % (original - len(arguments)))
+  arguments = [
+      (os.path.join(_DATA_DIR,
+                    "%s.pdf" % (row.School.replace(' ', '_').lower())),
+       row.Download) for row in data.itertuples() if row.Download and (
+           not collegeFilter or collegeFilter.lower() in row.School.lower())
+  ]
+  print("Dropped %s values without URLs." % (len(dropped)))
+  if _DEBUG or _PRINT_FAILURES:
+    for school, url in zip(dropped.School, dropped['General Link']):
+      print("Did not downloand PDF for %s. Missing URL. General URL is: %s" %
+            (school, url))
   with futures.ThreadPoolExecutor(max_workers=10) as executor:
     results = executor.map(download_file, arguments)
 
@@ -377,17 +405,20 @@ def DownloadPdfs() -> None:
     pass
 
 
-def ConvertToText() -> None:
+def ConvertToText(collegeFilter: Optional[str]) -> None:
   '''Converts input data into str.
   '''
   processes: List[Tuple[str, Any]] = []
   for root, filename in getPFDFilenames():
     infilepath = os.path.join(root, filename)
     basename = filename[:-len('.pdf')]
-    outfilepath = os.path.join(root, _OUT_DIR, '%s.txt' % basename)
-    command = ['gs', '-sDEVICE=txtwrite', '-o', outfilepath, infilepath]
-    if _DEBUG: print("Running command %s." % " ".join(command))
-    processes.append((filename, subprocess.Popen(command)))
+    if (collegeFilter is None or editdistance.eval(collegeFilter, basename) /
+        (len(collegeFilter) + len(basename)) < 0.5):
+      outfilepath = os.path.join(root, _OUT_DIR, '%s.txt' % basename)
+      command = ['gs', '-sDEVICE=txtwrite', '-o', outfilepath, infilepath]
+      if _DEBUG:
+        print("Running command %s" % " ".join(command))
+      processes.append((filename, subprocess.Popen(command, stdout=_FNULL)))
 
   successful = 0
   failed: List[str] = []
@@ -397,12 +428,14 @@ def ConvertToText() -> None:
     else:
       failed.append(filename)
     if successful % 10 == 0:
-      print("Finished waiting for %s successful conversions." % successful)
+      if _DEBUG:
+        print("Finished waiting for %s successful conversions." % successful)
 
   print("Finished %s successful conversion%s of %s." %
         (successful, "" if successful < 2 else "s", len(processes)))
-  for failure in failed:
-    print("Failed to convert file: %s" % failure)
+  if _DEBUG or _PRINT_FAILURES:
+    for failure in failed:
+      print("Failed to convert file: %s" % failure)
 
 
 def add_bool_arg(parser: argparse.ArgumentParser,
@@ -422,6 +455,29 @@ def getTable(collegeFilter: str) -> pd.DataFrame:
   return pd.DataFrame.from_dict(data)
 
 
+def analyzeRawData(data: pd.DataFrame) -> pd.DataFrame:
+  totalEnrolled, totalAdmitted, totalApplicants = None, None, None
+  if 'Women Enrolled' in data.columns and 'Men Enrolled' in data.columns:
+    totalEnrolled = data["Women Enrolled"].add(
+        data["Men Enrolled"], fill_value=0)
+  if 'Women Applied' in data.columns and 'Men Applied' in data.columns:
+    totalApplicants = data["Women Applied"].add(
+        data["Men Applied"], fill_value=0)
+  if 'Women Admitted' in data.columns and 'Men Admitted' in data.columns:
+    totalAdmitted = data["Women Admitted"].add(
+        data["Men Admitted"], fill_value=0)
+  if totalAdmitted is not None and totalApplicants is not None:
+    data["Admissions Rate"] = totalAdmitted / totalApplicants
+  if totalEnrolled is not None and totalAdmitted is not None:
+    data["Yield"] = totalEnrolled / totalAdmitted
+  if 'Men Admitted' in data.columns and 'Men Applied' in data.columns:
+    data["Men Admissions Rate"] = data["Men Admitted"] / data["Men Applied"]
+  if 'Women Admitted' in data.columns and 'Women Applied' in data.columns:
+    data["Women Admissions Rate"] = data["Women Admitted"] / data[
+        "Women Applied"]
+  return data
+
+
 def main():
   parser = argparse.ArgumentParser(description='Generate College Data Files')
   parser.add_argument('--college', default=None, type=str)
@@ -430,15 +486,38 @@ def main():
   add_bool_arg(parser, 'debug')
   add_bool_arg(parser, 'print_failures')
   args = parser.parse_args()
-  if args.download:
-    DownloadPdfs()
-  if args.convert:
-    ConvertToText()
   global _DEBUG, _PRINT_FAILURES
   _DEBUG = args.debug
   _PRINT_FAILURES = args.print_failures
 
-  # getTable(args.college).to_csv('data/results.csv')
+  if args.download:
+    DownloadPdfs(args.college)
+  if args.convert:
+    ConvertToText(args.college)
+
+  results = getTable(args.college)
+  results = analyzeRawData(results)
+
+  OUTPUT_COLUMNS = [
+      column for column in (
+          'College Name', 'Admissions Rate', 'Yield', 'Men Admissions Rate',
+          'Women Admissions Rate', 'Men Applied', 'Men Admitted',
+          'Men Enrolled', 'Women Admitted', 'Women Applied', 'Women Enrolled',
+          'Number of ED Applicants', 'Number of ED Applicants Admitted',
+          'EA Deadline', 'EA Notification', 'ED I Deadline',
+          'ED I Notification', 'ED II Deadline', 'ED II Notification',
+          'Average GPA', 'SAT Math 25%', 'SAT Math 75%', 'SAT Reading 25%',
+          'SAT Reading 75%', 'GPA >3.75', 'GPA >3.50', 'GPA >3.25',
+          'GPA >3.00', 'GPA >2.50', 'GPA >2.00', 'GPA >1.00 ',
+          'SAT Math (200-299)', 'SAT Math (700-800)', 'SAT Math (600-699)',
+          'SAT Math (500-599)', 'SAT Math (400-499)', 'SAT Math (300-399)',
+          'SAT Reading (700-800)', 'SAT Reading (600-699)',
+          'SAT Reading (500-599)', 'SAT Reading (400-499)',
+          'SAT Reading (300-399)', 'SAT Reading (200-299)', 'filename')
+      if column in results.columns
+  ]
+  results = results[OUTPUT_COLUMNS]
+  results.to_csv('results.csv')
 
 
 if __name__ == '__main__':
