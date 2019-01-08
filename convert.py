@@ -494,6 +494,9 @@ def analyzeRawData(data: pd.DataFrame) -> pd.DataFrame:
   if 'Women Admitted' in data.columns and 'Women Applied' in data.columns:
     data["Women Admissions Rate"] = data["Women Admitted"] / data[
         "Women Applied"]
+  if 'Number of ED Applicants' in data.columns and 'Number of ED Applicants Admitted' in data.columns:
+    data['ED Admissions Rate'] = data['Number of ED Applicants Admitted'].div(
+        data['Number of ED Applicants'], fill_value=0)
   return data
 
 
